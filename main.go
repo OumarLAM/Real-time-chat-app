@@ -2,44 +2,76 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/gorilla/websocket"
 )
+
+var clients = make(map[*websocket.Conn]bool)
+var broadcast = make(chan Message)
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 }
 
+type Message struct {
+	Email    string `json:"email"`
+	Username string `json:"username"`
+	Message  string `json:"message"`
+}
+
+func main() {
+	fs := http.FileServer(http.Dir("public"))
+	http.Handle("/", fs)
+	http.HandleFunc("/ws", handleConnections)
+
+	go handleMessages()
+
+	fmt.Println("Server is running on http://localhost:8000")
+	err := http.ListenAndServe(":8000", nil)
+	if err != nil {
+		fmt.Println(err)
+	}
+}
+
 func handleConnections(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	defer conn.Close()
+
+	defer ws.Close()
+
+	clients[ws] = true
 
 	for {
-		messageType, p, err := conn.ReadMessage()
+		var msg Message
+
+		err := ws.ReadJSON(&msg)
 		if err != nil {
-			fmt.Println(err)
-			return
+			log.Printf("Error: %v", err)
+			delete(clients, ws)
+			break
 		}
-		if err := conn.WriteMessage(messageType, p); err != nil {
-			fmt.Println(err)
-			return
-		}
+
+		broadcast <- msg
 	}
 }
 
-func main() {
-	http.HandleFunc("/ws", handleConnections)
-	http.Handle("/", http.FileServer(http.Dir("public")))
+func handleMessages() {
+	for {
+		msg := <-broadcast
 
-	fmt.Println("Server is running on http://localhost:8080")
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		fmt.Println("Error starting server: ", err)
+		for client := range clients {
+			err := client.WriteJSON(msg)
+			if err != nil {
+				log.Printf("Error: %v", err)
+				client.Close()
+				delete(clients, client)
+			}
+		}
 	}
 }
